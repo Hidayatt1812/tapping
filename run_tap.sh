@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -e
 
-# GANTI INI sesuai port kamu di WSL1:
-FPORT="/dev/ttyS3"   # RS232 (FCC <-> PTS) TAP OUTPUT
-PPORT="/dev/ttyS4"   # RS485 (PTS <-> Dispenser) TAP OUTPUT
+
+FPORT="/dev/ttyS3"   
+PPORT="/dev/ttyS4"   
 
 python3 tap.py \
-  --fport "$FPORT" --pport "$PPORT" \
-  --baud-f 57600 --baud-p 19200 \
+  --fport "/dev/ttyACM1" --pport "/dev/ttyACM1" \
+  --baud-f 9600 --baud-p 9600 \
   --out log_tap.txt \
   --mode hex

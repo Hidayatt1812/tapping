@@ -4,17 +4,19 @@ import time
 import threading
 import queue
 from datetime import datetime
+
 import serial
 
 
 def ts_now():
     now = datetime.now()
-    return now.strftime("%H:%M:%S.") + f"{int(now.microsecond/1000):03d}"
+    return now.strftime("%H:%M:%S.") + f"{int(now.microsecond / 1000):03d}"
 
 
 def bytes_to_text(data: bytes, mode: str) -> str:
     if mode == "hex":
         return data.hex(" ").upper()
+
     out = []
     for b in data:
         if 32 <= b <= 126:
@@ -28,110 +30,43 @@ def bytes_to_text(data: bytes, mode: str) -> str:
     return "".join(out)
 
 
-def split_with_dir_markers(buf: bytes):
+def safe_put(q: queue.Queue, msg: str):
+    try:
+        q.put(msg, timeout=0.2)
+    except queue.Full:
+        # Drop to avoid hang if disk/console is slow
+        pass
+
+
+def reader(label: str, port: str, baud: int, serial_params: dict, mode: str,
+           out_q: queue.Queue, stop_evt: threading.Event,
+           reconnect_delay: float, read_sleep: float):
     """
-    Kalau stream mengandung marker arah ASCII, kita pecah jadi event berlabel.
-    Marker yang didukung (case-insensitive):
-      - b'RX:'  => FRX
-      - b'TX:'  => FTX
-
-    Kalau tidak ada marker, return 1 event 'F??' (unknown direction).
-    """
-    up = buf.upper()
-
-    # jika tidak ada marker sama sekali
-    if b"RX:" not in up and b"TX:" not in up:
-        return [("F??", buf)]
-
-    # parsing sederhana: cari semua marker dan ambil segmen setelahnya sampai marker berikutnya
-    events = []
-    i = 0
-    while i < len(buf):
-        up = buf.upper()
-        rx_pos = up.find(b"RX:", i)
-        tx_pos = up.find(b"TX:", i)
-
-        # cari marker terdekat
-        candidates = [(rx_pos, "FRX"), (tx_pos, "FTX")]
-        candidates = [(pos, lab) for pos, lab in candidates if pos != -1]
-        if not candidates:
-            # sisa data tanpa marker -> lekatkan ke event terakhir kalau ada
-            if events:
-                lab, prev = events[-1]
-                events[-1] = (lab, prev + buf[i:])
-            else:
-                events.append(("F??", buf[i:]))
-            break
-
-        pos, lab = min(candidates, key=lambda x: x[0])
-
-        # data sebelum marker -> lekatkan ke event sebelumnya
-        if pos > i:
-            if events:
-                elab, prev = events[-1]
-                events[-1] = (elab, prev + buf[i:pos])
-            else:
-                events.append(("F??", buf[i:pos]))
-
-        # lompat lewat marker
-        j = pos + 3  # len("RX:") / len("TX:")
-        # cari marker berikutnya
-        up2 = buf.upper()
-        next_rx = up2.find(b"RX:", j)
-        next_tx = up2.find(b"TX:", j)
-        next_candidates = [p for p in [next_rx, next_tx] if p != -1]
-        end = min(next_candidates) if next_candidates else len(buf)
-
-        payload = buf[j:end]
-        if payload:
-            events.append((lab, payload))
-        i = end
-
-    # buang event kosong
-    events = [(lab, p) for lab, p in events if p]
-    return events if events else [("F??", buf)]
-
-
-def serial_reader_fcc(port, baud, bytesize, parity, stopbits, mode,
-                      out_q, stop_evt, reopen_delay=1.0, timeout=0.1):
-    """
-    FCC RS232 tap reader.
-    - Kalau ada marker RX:/TX: -> output FRX/FTX
-    - Kalau tidak -> output F?? (unknown direction)
+    Non-blocking reader with auto-reconnect.
+    Output: TAP <label>: <timestamp> <data>
     """
     while not stop_evt.is_set():
         ser = None
         try:
-            ser = serial.Serial(port=port, baudrate=baud, bytesize=bytesize,
-                                parity=parity, stopbits=stopbits, timeout=timeout)
+            ser = serial.Serial(port=port, baudrate=baud, timeout=0, **serial_params)
             try:
                 ser.reset_input_buffer()
             except Exception:
                 pass
 
-            out_q.put(f"F: {ts_now()} INFO connected {port} @ {baud}")
+            safe_put(out_q, f"TAP {label}: {ts_now()} INFO connected {port} @ {baud}")
 
             while not stop_evt.is_set():
-                n = ser.in_waiting
-                if n:
-                    data = ser.read(n)
-                    if data:
-                        # cek marker arah
-                        events = split_with_dir_markers(data)
-                        for lab, payload in events:
-                            txt = bytes_to_text(payload, mode)
-                            # Format sesuai request: F: <ts> <FRX/FTX> <data>
-                            line = f"F: {ts_now()} {lab} {txt}"
-                            try:
-                                out_q.put(line, timeout=0.2)
-                            except queue.Full:
-                                pass
+                data = ser.read(4096)
+                if data:
+                    line = f"TAP {label}: {ts_now()} {bytes_to_text(data, mode)}"
+                    safe_put(out_q, line)
                 else:
-                    time.sleep(0.01)
+                    time.sleep(read_sleep)
 
         except Exception as e:
-            out_q.put(f"F: {ts_now()} ERROR {port}: {e}")
-            time.sleep(reopen_delay)
+            safe_put(out_q, f"TAP {label}: {ts_now()} ERROR {port}: {e}")
+            time.sleep(reconnect_delay)
         finally:
             if ser:
                 try:
@@ -140,50 +75,7 @@ def serial_reader_fcc(port, baud, bytesize, parity, stopbits, mode,
                     pass
 
 
-def serial_reader_rs485(port, baud, bytesize, parity, stopbits, mode,
-                        out_q, stop_evt, reopen_delay=1.0, timeout=0.1):
-    """
-    RS485 tap reader.
-    Dengan 1 input, biasanya juga tidak bisa bedain arah,
-    jadi output: P: <ts> <data>
-    """
-    while not stop_evt.is_set():
-        ser = None
-        try:
-            ser = serial.Serial(port=port, baudrate=baud, bytesize=bytesize,
-                                parity=parity, stopbits=stopbits, timeout=timeout)
-            try:
-                ser.reset_input_buffer()
-            except Exception:
-                pass
-
-            out_q.put(f"P: {ts_now()} INFO connected {port} @ {baud}")
-
-            while not stop_evt.is_set():
-                n = ser.in_waiting
-                if n:
-                    data = ser.read(n)
-                    if data:
-                        line = f"P: {ts_now()} {bytes_to_text(data, mode)}"
-                        try:
-                            out_q.put(line, timeout=0.2)
-                        except queue.Full:
-                            pass
-                else:
-                    time.sleep(0.01)
-
-        except Exception as e:
-            out_q.put(f"P: {ts_now()} ERROR {port}: {e}")
-            time.sleep(reopen_delay)
-        finally:
-            if ser:
-                try:
-                    ser.close()
-                except Exception:
-                    pass
-
-
-def writer(outfile, out_q, stop_evt, also_print=True):
+def writer(outfile: str, out_q: queue.Queue, stop_evt: threading.Event, also_print: bool):
     with open(outfile, "a", encoding="utf-8") as f:
         while not stop_evt.is_set() or not out_q.empty():
             try:
@@ -196,19 +88,77 @@ def writer(outfile, out_q, stop_evt, also_print=True):
                 print(line, flush=True)
 
 
+def parse_port_specs(specs):
+    """
+    specs example:
+      ["TAP1=/dev/ttyS3@57600", "TAP2=/dev/ttyS4@19200"]
+      or ["=/dev/ttyS3@57600"] (label auto)
+      or ["/dev/ttyS3@57600"]  (label auto)
+      or ["TAP1=/dev/ttyS3"]   (baud default)
+    returns list of (label, port, baud or None)
+    """
+    out = []
+    auto_i = 1
+
+    for s in specs:
+        s = s.strip()
+        label = None
+        port_part = s
+
+        if "=" in s:
+            left, right = s.split("=", 1)
+            if left.strip():
+                label = left.strip()
+            port_part = right.strip()
+
+        if "@" in port_part:
+            port, baud_s = port_part.split("@", 1)
+            port = port.strip()
+            baud = int(baud_s.strip())
+        else:
+            port = port_part.strip()
+            baud = None
+
+        if not label:
+            label = f"TAP{auto_i}"
+            auto_i += 1
+
+        if not port:
+            raise ValueError(f"Port kosong pada spec: {s}")
+
+        out.append((label, port, baud))
+
+    return out
+
+
 def main():
-    ap = argparse.ArgumentParser(description="Easy 2-port tap logger (FCC RS232 + RS485) with ms timestamp + auto reconnect")
-    ap.add_argument("--fport", required=True)
-    ap.add_argument("--pport", required=True)
-    ap.add_argument("--baud-f", type=int, default=57600)
-    ap.add_argument("--baud-p", type=int, default=19200)
-    ap.add_argument("--bytesize", type=int, default=8, choices=[5, 6, 7, 8])
-    ap.add_argument("--parity", default="N", choices=["N", "E", "O", "M", "S"])
-    ap.add_argument("--stopbits", type=int, default=1, choices=[1, 2])
-    ap.add_argument("--mode", default="hex", choices=["hex", "ascii"])
-    ap.add_argument("--out", default="log_tap.txt")
-    ap.add_argument("--queue-max", type=int, default=10000)
+    ap = argparse.ArgumentParser(
+        description="Flexible multi-port serial TAP logger (1,2,3,... ports) with ms timestamp, non-blocking, auto-reconnect."
+    )
+    ap.add_argument(
+        "--port",
+        action="append",
+        required=True,
+        help=("Port spec (repeatable). Format: "
+              "'LABEL=/dev/ttyS3@57600' atau '/dev/ttyS3@57600' atau 'LABEL=/dev/ttyS3'. "
+              "Bisa dipakai berkali-kali: --port ... --port ...")
+    )
+
+    ap.add_argument("--baud-default", type=int, default=19200, help="Default baud kalau tidak ditulis @ (default 19200)")
+    ap.add_argument("--out", default="tap_multi.txt", help="Output TXT (append). Default tap_multi.txt")
+    ap.add_argument("--mode", choices=["hex", "ascii"], default="hex", help="Payload format: hex/ascii")
+    ap.add_argument("--no-print", action="store_true", help="Kalau diaktifkan, tidak print ke terminal (hanya file)")
+    ap.add_argument("--queue-max", type=int, default=30000, help="Max log queue (anti hang). Default 30000")
+    ap.add_argument("--reconnect-delay", type=float, default=1.0, help="Delay reconnect detik. Default 1.0")
+    ap.add_argument("--read-sleep-ms", type=float, default=1.0, help="Sleep saat tidak ada data (ms). Default 1.0")
+
+    ap.add_argument("--bytesize", type=int, choices=[5, 6, 7, 8], default=8, help="Data bits (default 8)")
+    ap.add_argument("--parity", choices=["N", "E", "O", "M", "S"], default="N", help="Parity (default N)")
+    ap.add_argument("--stopbits", choices=[1, 2], type=int, default=1, help="Stop bits (default 1)")
+
     args = ap.parse_args()
+
+    port_specs = parse_port_specs(args.port)
 
     parity_map = {
         "N": serial.PARITY_NONE,
@@ -217,32 +167,51 @@ def main():
         "M": serial.PARITY_MARK,
         "S": serial.PARITY_SPACE,
     }
-    bytesize_map = {5: serial.FIVEBITS, 6: serial.SIXBITS, 7: serial.SEVENBITS, 8: serial.EIGHTBITS}
+    bytesize_map = {
+        5: serial.FIVEBITS,
+        6: serial.SIXBITS,
+        7: serial.SEVENBITS,
+        8: serial.EIGHTBITS,
+    }
     stopbits_map = {1: serial.STOPBITS_ONE, 2: serial.STOPBITS_TWO}
+
+    serial_params = {
+        "bytesize": bytesize_map[args.bytesize],
+        "parity": parity_map[args.parity],
+        "stopbits": stopbits_map[args.stopbits],
+    }
 
     out_q = queue.Queue(maxsize=args.queue_max)
     stop_evt = threading.Event()
 
-    tw = threading.Thread(target=writer, args=(args.out, out_q, stop_evt, True), daemon=True)
-    tf = threading.Thread(
-        target=serial_reader_fcc,
-        args=(args.fport, args.baud_f, bytesize_map[args.bytesize], parity_map[args.parity],
-              stopbits_map[args.stopbits], args.mode, out_q, stop_evt),
+    t_writer = threading.Thread(
+        target=writer,
+        args=(args.out, out_q, stop_evt, not args.no_print),
         daemon=True
     )
-    tp = threading.Thread(
-        target=serial_reader_rs485,
-        args=(args.pport, args.baud_p, bytesize_map[args.bytesize], parity_map[args.parity],
-              stopbits_map[args.stopbits], args.mode, out_q, stop_evt),
-        daemon=True
-    )
+    t_writer.start()
 
-    tw.start()
-    tf.start()
-    tp.start()
+    threads = [t_writer]
+
+    read_sleep = max(args.read_sleep_ms, 0.0) / 1000.0
+
+    for label, port, baud in port_specs:
+        b = baud if baud is not None else args.baud_default
+        t = threading.Thread(
+            target=reader,
+            args=(label, port, b, serial_params, args.mode, out_q, stop_evt,
+                  args.reconnect_delay, read_sleep),
+            daemon=True
+        )
+        t.start()
+        threads.append(t)
 
     print(f"Logging => {args.out}")
-    print("Ctrl+C untuk stop.\n")
+    print("Ports:")
+    for label, port, baud in port_specs:
+        b = baud if baud is not None else args.baud_default
+        print(f"  - {label}: {port} @ {b}")
+    print("\nCtrl+C untuk stop.\n")
 
     try:
         while True:
