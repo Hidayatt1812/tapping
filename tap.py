@@ -160,23 +160,10 @@ class SerialTapper:
     
     def detect_direction(self, port_name):
         """
-        Deteksi arah komunikasi berdasarkan timing dan pattern
-        Mengembalikan indikasi TX/RX
+        Untuk tapping, semua data yang kita baca adalah RX (Receive)
+        Karena kita hanya membaca/mendengarkan, bukan mengirim
         """
-        current_time = time.time()
-        
-        if port_name in self.last_activity:
-            time_diff = current_time - self.last_activity[port_name]
-            # Jika ada gap waktu, kemungkinan ini adalah TX baru
-            if time_diff > 0.1:  # 100ms threshold
-                direction = "TX"
-            else:
-                direction = "RX"
-        else:
-            direction = "TX"
-        
-        self.last_activity[port_name] = current_time
-        return direction
+        return "RX"
     
     def display_data(self, conn_info, data, timestamp):
         """Display data ke console dengan format yang rapi"""
@@ -189,10 +176,9 @@ class SerialTapper:
         self.stats[port]['bytes'] += len(data)
         self.stats[port]['packets'] += 1
         
-        # Header
-        arrow = "→" if direction == "TX" else "←"
+        # Header - semua data adalah RX karena kita hanya tap/baca
         print(f"{color}{self.colors['bold']}{'─'*80}{self.colors['reset']}")
-        print(f"{color}[{timestamp}] {label} ({port}) {arrow} {direction} | Length: {len(data)} bytes{self.colors['reset']}")
+        print(f"{color}[{timestamp}] {label} ({port}) | {direction} | Length: {len(data)} bytes{self.colors['reset']}")
         
         # Data display based on mode
         if self.display_mode == 'hex':
@@ -223,11 +209,8 @@ class SerialTapper:
                 else:  # hex
                     data_str = self.format_hex(data)
                 
-                # Format: RX atau TX dengan timestamp dan data
-                if direction == "RX":
-                    f.write(f"RX : {timestamp} {data_str}\n")
-                else:  # TX
-                    f.write(f"TX : {timestamp} {data_str}\n")
+                # Format: RX dengan timestamp dan data (semua adalah RX karena tapping)
+                f.write(f"RX : {timestamp} {data_str}\n")
         except Exception as e:
             print(f"{self.colors['red']}Error writing to log: {e}{self.colors['reset']}")
     
@@ -382,14 +365,16 @@ Variables untuk Nama File Log:
 
 Format Log File:
   RX : 2025-02-25 10:30:45.123 48 65 6C 6C 6F 20 57 6F 72 6C 64
-  TX : 2025-02-25 10:30:45.456 4F 4B 0D 0A
+  RX : 2025-02-25 10:30:45.456 4F 4B 0D 0A
+  
+  Semua data adalah RX (Receive) karena ini adalah passive tapping.
 
 Catatan:
   - Program ini HANYA membaca (read-only), tidak mengirim data
   - Cocok untuk tapping komunikasi RS-232, RS-422, RS-485
   - Setiap port bisa punya baudrate berbeda
-  - Arah komunikasi (TX/RX) dideteksi berdasarkan timing pattern
-  - Log file dalam format TXT dengan format: RX/TX : <timestamp> <data>
+  - Semua data yang tercatat adalah RX karena passive tapping (hanya baca)
+  - Log file dalam format TXT dengan format: RX : <timestamp> <data>
   - Display mode (console) dan log format (file) bisa berbeda
   - Nama file log otomatis ditambah extension .txt jika belum ada
         """
