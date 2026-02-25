@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 set -e
 
+# one port logger
+python3 tap_logger_multiport.py --port /dev/ttyS3@19200 --out tap.txt
 
-FPORT="/dev/ttyS3"   
-PPORT="/dev/ttyS4"   
+# two port logger
+# python3 tap_logger_multiport.py \
+#   --port FCC=/dev/ttyS3@57600 \
+#   --port PTS=/dev/ttyS4@19200 \
+#   --out tap.txt
 
-python3 tap.py \
-  --fport "/dev/ttyACM1" --pport "/dev/ttyACM1" \
-  --baud-f 9600 --baud-p 9600 \
-  --out log_tap.txt \
-  --mode hex
+# three port logger
+# python3 tap_logger_multiport.py \
+#   --port TAP1=/dev/ttyS3@57600 \
+#   --port TAP2=/dev/ttyS4@19200 \
+#   --port TAP3=/dev/ttyS5@19200 \
+#   --out tap.txt
