@@ -1,0 +1,2 @@
+- kalau serialnya sudah kebuka sama yang lain otomatis program berhenti
+- buat bedain rx tx di rs485
