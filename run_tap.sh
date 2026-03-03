@@ -514,6 +514,74 @@ watch_data_log() {
     tail -f "$DATA_LOG"
 }
 
+# Run analyze.py terhadap log terakhir
+run_analyze() {
+    ANALYZE_SCRIPT="$SCRIPT_DIR/analyze.py"
+
+    if [ ! -f "$ANALYZE_SCRIPT" ]; then
+        print_error "analyze.py tidak ditemukan di $SCRIPT_DIR"
+        exit 1
+    fi
+
+    if ! python3 -c "import json, re, math" &>/dev/null 2>&1; then
+        print_error "Python3 tidak tersedia"
+        exit 1
+    fi
+
+    # Cari log file terbaru di direktori script
+    LATEST_LOG=$(ls -t "$SCRIPT_DIR"/tapping_*.txt 2>/dev/null | head -1)
+
+    if [ -z "$LATEST_LOG" ]; then
+        # Coba ambil dari output log tapper
+        if [ -f "$OUTPUT_LOG" ]; then
+            LATEST_LOG=$(grep "Log file:" "$OUTPUT_LOG" 2>/dev/null | tail -1 | awk '{print $NF}')
+        fi
+    fi
+
+    if [ -z "$LATEST_LOG" ] || [ ! -f "$LATEST_LOG" ]; then
+        print_error "Tidak ada log file ditemukan. Jalankan tapper dulu:"
+        echo "  ./run_tap.sh start"
+        exit 1
+    fi
+
+    OUTPUT_JSON="$SCRIPT_DIR/protocol_map.json"
+
+    echo ""
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}  PROTOCOL ANALYZER${NC}"
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
+    echo ""
+    print_info "Log file : $LATEST_LOG"
+    print_info "Output   : $OUTPUT_JSON"
+    echo ""
+
+    python3 "$ANALYZE_SCRIPT" "$LATEST_LOG" -o "$OUTPUT_JSON"
+
+    if [ $? -eq 0 ] && [ -f "$OUTPUT_JSON" ]; then
+        print_success "Analisis selesai → $OUTPUT_JSON"
+    else
+        print_error "Analisis gagal"
+        exit 1
+    fi
+}
+
+# Run analyze.py dengan hex string manual
+run_analyze_hex() {
+    ANALYZE_SCRIPT="$SCRIPT_DIR/analyze.py"
+
+    if [ ! -f "$ANALYZE_SCRIPT" ]; then
+        print_error "analyze.py tidak ditemukan di $SCRIPT_DIR"
+        exit 1
+    fi
+
+    OUTPUT_JSON="$SCRIPT_DIR/protocol_map.json"
+    echo ""
+    print_info "Hex input: $1"
+    echo ""
+
+    python3 "$ANALYZE_SCRIPT" --hex "$1" -o "$OUTPUT_JSON"
+}
+
 # Main script execution
 case "${1:-start}" in
     start)
@@ -541,18 +609,31 @@ case "${1:-start}" in
         sleep 2
         start_tapper
         ;;
+    analyze)
+        run_analyze
+        ;;
+    analyze-hex)
+        if [ -z "$2" ]; then
+            print_error "Gunakan: $0 analyze-hex \"FC FC FC 02 01 ...\""
+            exit 1
+        fi
+        run_analyze_hex "$2"
+        ;;
     *)
         echo ""
-        echo "Usage: $0 {start|stop|restart|status|logs|tail|watch}"
+        echo "Usage: $0 {start|stop|restart|status|logs|tail|watch|analyze|analyze-hex}"
         echo ""
         echo "Commands:"
-        echo "  start   - Jalankan tapper di background"
-        echo "  stop    - Hentikan tapper"
-        echo "  restart - Restart tapper"
-        echo "  status  - Lihat status tapper (PID, CPU, memory)"
-        echo "  logs    - Lihat output log (last 50 lines)"
-        echo "  tail    - Monitor output log realtime (Ctrl+C keluar)"
-        echo "  watch   - Monitor data log realtime (Ctrl+C keluar)"
+        echo "  start        - Jalankan tapper di background"
+        echo "  stop         - Hentikan tapper"
+        echo "  restart      - Restart tapper"
+        echo "  status       - Lihat status tapper (PID, CPU, memory)"
+        echo "  logs         - Lihat output log (last 50 lines)"
+        echo "  tail         - Monitor output log realtime (Ctrl+C keluar)"
+        echo "  watch        - Monitor data log realtime (Ctrl+C keluar)"
+        echo "  analyze      - Analisis log terakhir → protocol_map.json"
+        echo "  analyze-hex  - Analisis satu hex string manual"
+        echo "                 Contoh: $0 analyze-hex \"FC FC FC 02 01 00\""
         echo ""
         echo "Konfigurasi:"
         echo "  Edit bagian KONFIGURASI di file ini ($0)"
